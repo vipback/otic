@@ -3,7 +3,6 @@ name: 更新 Proxy
 # 指定本工作流运行所需的权限
 permissions:
   contents: write
-
 on:
   push:
     branches:
