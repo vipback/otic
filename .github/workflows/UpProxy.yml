@@ -1,34 +1,57 @@
-name: 更新 Proxy
+name: 'Eco CI Activity Checker'
+description: 'check if there has been a commit in the specificed repo/branch since the last workflow run and write to github output'
+inputs:
+  repo:
+    description: 'format: {repo-owner}/{repo-name}'
+    default: ${{ github.repository }}
+    required: false
+  branch:
+    description: 'the branch to check'
+    default: ${{ github.ref_name }}
+    required: false
+  personal-access-token:
+    description: 'personal access token with repo scope, if using with a private repository'
+    default: ${{ github.token }}
+    required: false
+  workflow-id:
+    description: 'the id of the workflow to check'
+    required: false
+    default: null
 
-# 指定本工作流运行所需的权限
-permissions:
-  contents: write
-on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/UpProxy.js"  # 当此文件变动时触发
-  schedule:
-    - cron: "*/10 * * * *"  # 每10分钟运行一次
-  workflow_dispatch:       # 支持手动触发
+outputs:
+  should_run:
+    description: 
+    value: ${{ steps.check_if_needs_to_run.outputs.should_run }}
+runs:
+  using: 'composite'
+  steps:
+    - id: check_if_needs_to_run
+      name: check last workflow run and last commit
+      shell: bash
+      run: |
+        workflow_id="${{ inputs.workflow-id }}"
+        if [[ $workflow_id == '' ]]; then
+            workflows_response=$(curl -s -H "Authorization: Bearer ${{ github.token }}" ${{ github.api_url }}/repos/${{ github.repository }}/actions/workflows)
+            workflow_id=$(echo $workflows_response | jq '.workflows[] | select(.name == "${{ github.workflow }}") | .id')
+        fi
+        
+        workflow_runs_response=$(curl -s -H "Authorization: Bearer ${{ github.token }}" https://api.github.com/repos/${{ inputs.repo }}/actions/workflows/$workflow_id/runs)
+        dateoflastrun=$(echo $workflow_runs_response | jq -r '.["workflow_runs"][1]["run_started_at"]')
+        state=$(echo $workflow_runs_response | jq -r '.["workflow_runs"][1]["conclusion"]')
+        commits_response=$(curl -s -H "Authorization: Bearer ${{ inputs.personal-access-token }}" https://api.github.com/repos/${{ inputs.repo }}/commits/${{ inputs.branch }})
+        dateoflastcommit=$(echo $commits_response | jq -r '.commit.author.date')
 
-jobs:
-  UpProxy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出仓库代码
-        uses: actions/checkout@v3
-
-      - name: 设置 Node.js 环境
-        uses: actions/setup-node@v3
-        with:
-          node-version: '16'
-
-      - name: 安装依赖
-        run: npm install axios adm-zip moment-timezone
-
-      - name: 运行更新 Proxy 脚本
-        run: node .github/workflows/UpProxy.js
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        echo "last commit: $dateoflastcommit"
+        echo "last run: $dateoflastrun"
+        echo "state of last run: $state"
+        
+        if [ -z $dateoflastrun ] || [ -z $dateoflastcommit ];then
+        echo "should_run=true" >> $GITHUB_OUTPUT\
+        &&  echo "NULL returned in API call for Activity Checker" >> $GITHUB_STEP_SUMMARY;
+        elif [ $state != 'success' ]; then echo "should_run=true" >> $GITHUB_OUTPUT;
+        else
+        lastrun_timestamp=$(date --date "$dateoflastrun" +'%s')
+        commit_timestamp=$(date --date "$dateoflastcommit" +'%s')
+        if [ $commit_timestamp -gt $lastrun_timestamp ]; then echo "should_run=true" >> $GITHUB_OUTPUT; fi
+        if [ $commit_timestamp -lt $lastrun_timestamp ]; then echo "should_run=false" >> $GITHUB_OUTPUT && echo "Workflow on ${{ inputs.repo }} and branch ${{ inputs.branch }} had no recent commits." >> $GITHUB_STEP_SUMMARY; fi
+        fi
